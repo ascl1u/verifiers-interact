@@ -1,0 +1,22 @@
+[project]
+name = "verifiers-interact"
+version = "0.1.0"
+description = "Observation constraints and navigation telemetry for verifiers RLMEnv"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = ["verifiers>=0.1.9"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/verifiers_interact"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
