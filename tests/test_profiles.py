@@ -1,6 +1,7 @@
 """Tests for ToolProfile presets."""
 
 from verifiers_interact.constraints import LineLimit, TokenBudget, Unconstrained
+from verifiers_interact.folders import StructureFolder, TruncateFolder, HeadTailFolder
 from verifiers_interact.profiles import ToolProfile
 
 
@@ -18,6 +19,7 @@ class TestToolProfile:
         self._assert_profile_shape(p)
         assert isinstance(p["constraint"], LineLimit)
         assert p["constraint"].max_lines == 50
+        assert isinstance(p["constraint"].folder, StructureFolder)
         assert p["max_iterations"] == 100
 
     def test_standard(self):
@@ -25,12 +27,14 @@ class TestToolProfile:
         self._assert_profile_shape(p)
         assert isinstance(p["constraint"], LineLimit)
         assert p["constraint"].max_lines == 200
+        assert isinstance(p["constraint"].folder, TruncateFolder)
 
     def test_power(self):
         p = ToolProfile.power()
         self._assert_profile_shape(p)
         assert isinstance(p["constraint"], TokenBudget)
         assert p["constraint"].max_chars == 16000
+        assert isinstance(p["constraint"].folder, HeadTailFolder)
 
     def test_unconstrained(self):
         p = ToolProfile.unconstrained()

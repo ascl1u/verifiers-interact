@@ -1,16 +1,23 @@
 """
-verifiers-interact: Observation constraints and navigation telemetry for RLMEnv.
+verifiers-interact: Context management as a search problem.
 
-A plugin library that extends Prime Intellect's verifiers with configurable
-observation constraints, enabling ablation studies on how context pressure
-affects RLM navigation performance.
+A plugin library that extends Prime Intellect's verifiers with observation
+constraints and context folding — enabling controlled ablation studies on
+how context pressure affects RLM navigation performance.
 """
 
 from .constraints import (
+    ConstraintResult,
     ObservationConstraint,
     LineLimit,
     TokenBudget,
     Unconstrained,
+)
+from .folders import (
+    ContextFolder,
+    TruncateFolder,
+    HeadTailFolder,
+    StructureFolder,
 )
 from .telemetry import NavigationMonitorRubric
 from .profiles import ToolProfile
@@ -26,11 +33,21 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    # Constraints
+    "ConstraintResult",
     "ObservationConstraint",
     "LineLimit",
     "TokenBudget",
     "Unconstrained",
+    # Folders
+    "ContextFolder",
+    "TruncateFolder",
+    "HeadTailFolder",
+    "StructureFolder",
+    # Environment
     "NavigationEnv",
+    # Telemetry
     "NavigationMonitorRubric",
+    # Profiles
     "ToolProfile",
 ]

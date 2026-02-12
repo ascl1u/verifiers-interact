@@ -1,21 +1,31 @@
 """
 Observation constraints for controlling what the agent sees.
 
-Each constraint takes raw tool output and returns a constrained version
-plus metadata about what was hidden. This enables ablation studies on
-how context pressure affects navigation performance.
+A constraint combines two decisions:
+  1. **Budget** — How much output to show (line count, character count, etc.)
+  2. **Folding** — How to compress what exceeds the budget
+
+This separation is the core abstraction. It lets researchers run controlled
+ablation studies: same budget, different folding strategies (or vice versa).
 
 Usage:
-    constraint = LineLimit(200)
-    constrained_text, meta = constraint.apply(raw_output)
-    # meta = {"lines_hidden": 150, "was_truncated": True, "total_lines": 350}
+    from verifiers_interact import LineLimit
+    from verifiers_interact.folders import StructureFolder
+
+    # Same 50-line budget, different folding strategies:
+    naive = LineLimit(50)                                  # hard truncation
+    smart = LineLimit(50, folder=StructureFolder())       # structural extraction
+    split = LineLimit(50, folder=HeadTailFolder(0.7))     # head + tail
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .folders import ContextFolder
 
 
 @dataclass
@@ -23,8 +33,8 @@ class ConstraintResult:
     """Result of applying an observation constraint.
 
     Attributes:
-        content: The (possibly truncated) output text.
-        was_truncated: Whether the constraint actually truncated anything.
+        content: The (possibly folded/truncated) output text.
+        was_truncated: Whether the constraint actually triggered.
         metadata: Constraint-specific stats (lines_hidden, chars_hidden, etc.)
     """
 
@@ -48,7 +58,7 @@ class ObservationConstraint(ABC):
             content: Raw output string from a tool call.
 
         Returns:
-            ConstraintResult with (possibly truncated) content and metadata.
+            ConstraintResult with (possibly folded) content and metadata.
         """
         ...
 
@@ -57,19 +67,26 @@ class ObservationConstraint(ABC):
 
 
 class LineLimit(ObservationConstraint):
-    """Truncate tool output to a maximum number of lines.
+    """Constrain tool output to a maximum number of lines.
 
-    Lines beyond the limit are replaced with a notice telling the agent
-    how many lines were hidden, encouraging it to use targeted queries.
+    When output exceeds the limit, the folder strategy determines
+    how to compress it. Default: naive head truncation.
 
     Args:
-        max_lines: Maximum number of lines to keep. Default: 200.
+        max_lines: Maximum number of lines to show. Default: 200.
+        folder: ContextFolder strategy for compression. Default: TruncateFolder.
     """
 
-    def __init__(self, max_lines: int = 200):
+    def __init__(self, max_lines: int = 200, folder: ContextFolder | None = None):
         if max_lines < 1:
             raise ValueError(f"max_lines must be >= 1, got {max_lines}")
         self.max_lines = max_lines
+        # Lazy import to avoid circular dependency
+        if folder is None:
+            from .folders import TruncateFolder
+
+            folder = TruncateFolder()
+        self.folder = folder
 
     def apply(self, content: str) -> ConstraintResult:
         lines = content.split("\n")
@@ -82,40 +99,45 @@ class LineLimit(ObservationConstraint):
                 metadata={"lines_shown": total, "lines_hidden": 0, "total_lines": total},
             )
 
+        # Delegate compression to the folder
+        folded = self.folder.fold(content, self.max_lines)
         hidden = total - self.max_lines
-        truncated = "\n".join(lines[: self.max_lines])
-        truncated += (
-            f"\n\n[OUTPUT TRUNCATED: {hidden} of {total} lines hidden. "
-            f"Use targeted queries to navigate.]"
-        )
+
         return ConstraintResult(
-            content=truncated,
+            content=folded,
             was_truncated=True,
             metadata={
                 "lines_shown": self.max_lines,
                 "lines_hidden": hidden,
                 "total_lines": total,
+                "folder": type(self.folder).__name__,
             },
         )
 
     def __repr__(self) -> str:
-        return f"LineLimit(max_lines={self.max_lines})"
+        return f"LineLimit(max_lines={self.max_lines}, folder={self.folder!r})"
 
 
 class TokenBudget(ObservationConstraint):
-    """Truncate tool output to a character budget (proxy for tokens).
+    """Constrain tool output to a character budget (proxy for tokens).
 
     Uses character count as a fast proxy for token count (~4 chars/token).
-    For exact token budgeting, subclass and override with a real tokenizer.
+    When exceeded, delegates to the folder for compression.
 
     Args:
         max_chars: Maximum characters to keep. Default: 4000 (~1000 tokens).
+        folder: ContextFolder strategy. Default: TruncateFolder.
     """
 
-    def __init__(self, max_chars: int = 4000):
+    def __init__(self, max_chars: int = 4000, folder: ContextFolder | None = None):
         if max_chars < 1:
             raise ValueError(f"max_chars must be >= 1, got {max_chars}")
         self.max_chars = max_chars
+        if folder is None:
+            from .folders import TruncateFolder
+
+            folder = TruncateFolder()
+        self.folder = folder
 
     def apply(self, content: str) -> ConstraintResult:
         total = len(content)
@@ -127,30 +149,26 @@ class TokenBudget(ObservationConstraint):
                 metadata={"chars_shown": total, "chars_hidden": 0, "total_chars": total},
             )
 
-        hidden = total - self.max_chars
-        # Truncate at last newline before budget to avoid mid-line cuts
-        truncated = content[: self.max_chars]
-        last_newline = truncated.rfind("\n")
-        if last_newline > self.max_chars // 2:
-            truncated = truncated[:last_newline]
-            hidden = total - last_newline
+        # Convert char budget to approximate line budget for the folder
+        avg_line_len = max(1, total // max(1, content.count("\n") + 1))
+        budget_lines = max(1, self.max_chars // avg_line_len)
 
-        truncated += (
-            f"\n\n[OUTPUT TRUNCATED: ~{hidden} characters hidden. "
-            f"Refine your query for more targeted results.]"
-        )
+        folded = self.folder.fold(content, budget_lines)
+        hidden = total - self.max_chars
+
         return ConstraintResult(
-            content=truncated,
+            content=folded,
             was_truncated=True,
             metadata={
-                "chars_shown": len(truncated),
+                "chars_shown": len(folded),
                 "chars_hidden": hidden,
                 "total_chars": total,
+                "folder": type(self.folder).__name__,
             },
         )
 
     def __repr__(self) -> str:
-        return f"TokenBudget(max_chars={self.max_chars})"
+        return f"TokenBudget(max_chars={self.max_chars}, folder={self.folder!r})"
 
 
 class Unconstrained(ObservationConstraint):

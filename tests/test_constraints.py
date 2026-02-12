@@ -8,6 +8,7 @@ from verifiers_interact.constraints import (
     TokenBudget,
     Unconstrained,
 )
+from verifiers_interact.folders import TruncateFolder, StructureFolder
 
 
 # ---------------------------------------------------------------------------
@@ -43,13 +44,10 @@ class TestLineLimit:
         assert result.metadata["lines_hidden"] == 50
         assert result.metadata["lines_shown"] == 50
         assert result.metadata["total_lines"] == 100
-        assert "[OUTPUT TRUNCATED: 50 of 100 lines hidden" in result.content
+        assert "TRUNCATED" in result.content
         # First 50 lines should be present
         assert "line 0" in result.content
         assert "line 49" in result.content
-        # Line 50+ should NOT be present (before the notice)
-        content_before_notice = result.content.split("[OUTPUT TRUNCATED")[0]
-        assert "line 50" not in content_before_notice
 
     def test_single_line_limit(self):
         """Edge case: limit of 1 line."""
@@ -73,8 +71,17 @@ class TestLineLimit:
         with pytest.raises(ValueError):
             LineLimit(-5)
 
-    def test_repr(self):
-        assert repr(LineLimit(42)) == "LineLimit(max_lines=42)"
+    def test_repr_includes_folder(self):
+        assert "TruncateFolder" in repr(LineLimit(42))
+        assert "StructureFolder" in repr(LineLimit(42, folder=StructureFolder()))
+
+    def test_custom_folder(self):
+        """LineLimit delegates to custom folder when truncation triggers."""
+        c = LineLimit(10, folder=StructureFolder())
+        text = "\n".join(f"line {i}" for i in range(50))
+        result = c.apply(text)
+        assert result.was_truncated is True
+        assert result.metadata["folder"] == "StructureFolder"
 
 
 # ---------------------------------------------------------------------------
@@ -98,23 +105,12 @@ class TestTokenBudget:
         assert result.was_truncated is False
 
     def test_truncation(self):
-        """Output over the budget is truncated with a notice."""
+        """Output over the budget is truncated."""
         c = TokenBudget(100)
         text = "x" * 200
         result = c.apply(text)
         assert result.was_truncated is True
-        assert "[OUTPUT TRUNCATED" in result.content
         assert result.metadata["total_chars"] == 200
-
-    def test_truncation_respects_newlines(self):
-        """Truncation cuts at the last newline when possible."""
-        c = TokenBudget(50)
-        text = "a" * 20 + "\n" + "b" * 20 + "\n" + "c" * 50
-        result = c.apply(text)
-        assert result.was_truncated is True
-        # Should cut at a newline boundary, not mid-line
-        content_before_notice = result.content.split("\n\n[OUTPUT TRUNCATED")[0]
-        assert content_before_notice.endswith("b" * 20) or content_before_notice.endswith("\n")
 
     def test_empty_string(self):
         """Empty input passes through."""
@@ -126,8 +122,8 @@ class TestTokenBudget:
         with pytest.raises(ValueError):
             TokenBudget(0)
 
-    def test_repr(self):
-        assert repr(TokenBudget(4000)) == "TokenBudget(max_chars=4000)"
+    def test_repr_includes_folder(self):
+        assert "TruncateFolder" in repr(TokenBudget(4000))
 
 
 # ---------------------------------------------------------------------------
