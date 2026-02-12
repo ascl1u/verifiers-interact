@@ -1,45 +1,32 @@
 # verifiers-interact
 
-**Context management as a search problem.**
+**Does hand-engineered observation compression outperform forcing the model to learn navigation under naive truncation?**
 
-A plugin for [Prime Intellect's verifiers](https://github.com/PrimeIntellect-ai/verifiers) that gives RLMs strict observation budgets and lets RL discover how to navigate within them.
+A plugin for [verifiers](https://github.com/PrimeIntellect-ai/verifiers) that enforces observation budgets on `RLMEnv` tool output, enabling controlled ablation studies on how context pressure shapes RLM search behavior.
 
 ## Thesis
 
-Today's RLMs see everything. When a tool returns 500 lines, the model gets all 500 lines. This is the opposite of the Bitter Lesson — it substitutes *context window* for *compute*, encouraging the model to scan rather than search.
+Today's RLMs see everything. When a REPL dumps 500 lines, the model gets all 500 lines. This substitutes *context window* for *compute* — the model scans instead of searching.
 
-`verifiers-interact` enforces **observation constraints** on RLMEnv tool output. Instead of showing the model everything and hoping it learns to skim, we show it *almost nothing* and force it to learn precise navigation.
+The [Bitter Lesson](http://www.incompleteideas.net/IncsightBrief.html) predicts that methods leveraging computation will always beat methods leveraging human knowledge. Applied to RLM observation:
 
-The hypothesis: an RLM trained under `LineLimit(50)` will develop stronger search heuristics than one trained with unlimited observation — and those heuristics will transfer to harder tasks.
+- **Budget constraints** are Bitter Lesson-compatible — they force the model to spend inference compute on targeted queries rather than passively consuming large outputs
+- **Hand-engineered compression** (extracting function signatures, keeping head+tail) encodes human priors about what's "important" — Sutton's argument predicts this helps short-term but loses at scale to models that learn their own navigation strategies
 
-### The Two Decisions
-
-Every observation constraint makes two decisions:
-
-1. **How much to show** — the budget (`LineLimit`, `TokenBudget`)
-2. **How to compress the rest** — the folding strategy (`TruncateFolder`, `HeadTailFolder`, `StructureFolder`)
-
-These compose independently, enabling factorial ablation studies:
+`verifiers-interact` separates these two decisions so you can test them independently:
 
 ```python
-from verifiers_interact import LineLimit, NavigationEnv
-from verifiers_interact.folders import StructureFolder, HeadTailFolder
+from verifiers_interact import NavigationEnv, LineLimit
+from verifiers_interact.folders import TruncateFolder, StructureFolder
 
-# Same budget, different folding → isolate the folding variable
-env_naive = NavigationEnv(constraint=LineLimit(50))
-env_struct = NavigationEnv(constraint=LineLimit(50, folder=StructureFolder()))
-env_split  = NavigationEnv(constraint=LineLimit(50, folder=HeadTailFolder(0.7)))
+# Bitter Lesson purist: dumb truncation, model must learn to navigate
+env_bitter = NavigationEnv(constraint=LineLimit(50, folder=TruncateFolder()))
+
+# Human prior: we extract structure for the model
+env_prior = NavigationEnv(constraint=LineLimit(50, folder=StructureFolder()))
+
+# Same budget. Which learns better search heuristics at scale?
 ```
-
-### Folding Strategies
-
-| Strategy | What the model sees | Best for |
-|----------|-------------------|----------|
-| `TruncateFolder` | First N lines + "[TRUNCATED]" | Baseline |
-| `HeadTailFolder` | First 60% + last 40% + "[... N lines elided ...]" | Logs, sequential output |
-| `StructureFolder` | `def`/`class`/`import` signatures + "[FOLDED]" | Code navigation |
-
-The `StructureFolder` is the key research primitive. It gives the model a **table of contents** — a structural map it can use to issue precise follow-up queries — rather than a wall of truncated text. The model trades *reading* for *searching*.
 
 ## Install
 
@@ -47,48 +34,82 @@ The `StructureFolder` is the key research primitive. It gives the model a **tabl
 uv sync
 ```
 
-## Usage
+## Architecture
+
+`NavigationEnv` subclasses `RLMEnv` and overrides two methods:
+
+- **`env_response`** — post-processes tool output through the constraint+folder pipeline before the model sees it
+- **`add_trajectory_step`** — injects navigation telemetry into trajectory extras for post-hoc analysis
+
+It also overrides `setup_state` to initialize per-rollout telemetry counters and auto-attaches `NavigationMonitorRubric` for WandB metrics.
+
+This is a ~500 LOC plugin, not a fork. One import, one extra kwarg on top of your existing `RLMEnv` setup.
+
+## Concepts
+
+### Constraints (the budget)
+
+A constraint decides **how much** output the model sees. This is the Bitter Lesson mechanism — it creates search pressure.
+
+| Constraint | What it does | Bitter Lesson? |
+|---|---|---|
+| `LineLimit(n)` | Cap output at `n` lines | ✅ Yes — forces compute |
+| `TokenBudget(n)` | Cap output at `n` characters (~n/4 tokens) | ✅ Yes — forces compute |
+| `Unconstrained()` | No-op passthrough | Control group |
+
+### Folders (the compression strategy)
+
+When a constraint triggers, a folder decides **how** to compress. This is where the Bitter Lesson tension lives.
+
+| Folder | What the model sees | Bitter Lesson? |
+|---|---|---|
+| `TruncateFolder` | First N lines, rest discarded | ✅ Purist — zero human priors |
+| `HeadTailFolder(r)` | First r% + last (1-r)% of output | ❌ Encodes "start and end matter more" |
+| `StructureFolder` | `def`/`class`/`import` signatures extracted via regex | ❌ Encodes human knowledge of code structure |
+
+Constraints and folders compose independently — enabling **N×M factorial ablation** across budgets and compression strategies.
+
+### Profiles (preset configurations)
+
+`ToolProfile` provides ready-made configurations for common experiment setups:
+
+| Profile | Constraint | Folder | Max Iterations | Intent |
+|---|---|---|---|---|
+| `minimal()` | `LineLimit(50)` | `StructureFolder` | 100 | Maximum search pressure + human priors |
+| `standard()` | `LineLimit(200)` | `TruncateFolder` | 50 | Balanced Bitter Lesson baseline |
+| `power()` | `TokenBudget(16K)` | `HeadTailFolder` | 30 | Generous budget with head+tail prior |
+| `unconstrained()` | `Unconstrained()` | — | 50 | Pure control group |
 
 ```python
-from verifiers_interact import NavigationEnv, LineLimit, ToolProfile
+from verifiers_interact import NavigationEnv, ToolProfile
 
-# Custom constraint with folding
-env = NavigationEnv(
-    constraint=LineLimit(200, folder=StructureFolder()),
-    dataset=my_dataset,
-    rubric=my_rubric,
-)
-
-# Or use a preset profile
-env = NavigationEnv(**ToolProfile.standard(), dataset=my_dataset, rubric=my_rubric)
+env = NavigationEnv(**ToolProfile.standard(), dataset=ds, rubric=rubric)
 ```
-
-### Profiles
-
-| Profile | Constraint | Folder | Iterations | Use case |
-|---------|-----------|--------|------------|----------|
-| `minimal()` | `LineLimit(50)` | `StructureFolder` | 100 | Maximum search pressure |
-| `standard()` | `LineLimit(200)` | `TruncateFolder` | 50 | Balanced training |
-| `power()` | `TokenBudget(16K)` | `HeadTailFolder` | 30 | Generous baseline |
-| `unconstrained()` | None | — | 50 | Pure control group |
 
 ### Telemetry
 
-`NavigationMonitorRubric` automatically exports to WandB:
+`NavigationMonitorRubric` automatically tracks and exports to WandB:
 
-- `nav_truncation_count` — how often the constraint fired
-- `nav_truncation_rate` — fraction of outputs that exceeded budget
-- `nav_lines_hidden` / `nav_chars_hidden` — total information withheld
-- Per-step `nav_stats` in trajectory extras for post-hoc analysis
+| Metric | Description |
+|---|---|
+| `nav_truncation_count` | How many tool outputs exceeded the budget |
+| `nav_truncation_rate` | Fraction of outputs that triggered compression |
+| `nav_lines_hidden` | Total lines withheld from the model |
+| `nav_chars_hidden` | Total characters withheld |
+| `nav_tool_output_count` | Total tool outputs processed |
+| `nav_constraint_type` | Which constraint was active |
 
-## Architecture
+Per-step `nav_stats` are injected into trajectory extras via `add_trajectory_step`, enabling post-hoc analysis of how navigation behavior evolves during training.
 
-`NavigationEnv` subclasses `RLMEnv`. It inherits the full sandbox lifecycle and overrides exactly two methods:
+## Demo
 
-- **`env_response`** — post-processes tool output through the constraint+folder pipeline
-- **`add_trajectory_step`** — injects navigation telemetry into trajectory extras
+Run the ablation demo to see all four observation strategies applied to the same 80-line Python file:
 
-This is a ~500 LOC plugin, not a fork. One import, one extra kwarg.
+```bash
+uv run python examples/ablation_demo.py
+```
+
+This shows, side-by-side, what the model sees under `Unconstrained`, `TruncateFolder`, `HeadTailFolder`, and `StructureFolder` — all with the same 15-line budget.
 
 ## Test
 
