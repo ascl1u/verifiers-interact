@@ -8,7 +8,7 @@ A plugin for [verifiers](https://github.com/PrimeIntellect-ai/verifiers) that en
 
 Today's RLMs see everything. When a REPL dumps 500 lines, the model gets all 500 lines. This substitutes *context window* for *compute* — the model scans instead of searching.
 
-The [Bitter Lesson](http://www.incompleteideas.net/IncsightBrief.html) predicts that methods leveraging computation will always beat methods leveraging human knowledge. Applied to RLM observation:
+The [Bitter Lesson](http://www.incompleteideas.net/IncIdeas/BitterLesson.html) predicts that methods leveraging computation will always beat methods leveraging human knowledge. Applied to RLM observation:
 
 - **Budget constraints** are Bitter Lesson-compatible — they force the model to spend inference compute on targeted queries rather than passively consuming large outputs
 - **Hand-engineered compression** (extracting function signatures, keeping head+tail) encodes human priors about what's "important" — Sutton's argument predicts this helps short-term but loses at scale to models that learn their own navigation strategies
